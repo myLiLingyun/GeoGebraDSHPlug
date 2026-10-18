@@ -1,0 +1,391 @@
+# SPDX-License-Identifier: GPL-3.0-only
+#
+# 这个 bundle 声明两件事：
+#   1. 宿主插件 geogebra-bridge-ui（就是本包自己的 index.js）：给网页界面提供
+#      「建画布 → 用户在浏览器里打开 → 确认已打开」这条路的同源代理路由；
+#   2. 数学模式（agent preset `math`）。
+#
+# 桥是一个独立的 MCP stdio 程序：https://github.com/myLiLingyun/GeoGebraMCPServer
+# （入口 bin/geogebra-mcp-bridge.mjs，自带依赖，可以脱离 DSH 单独跑）。
+# 它自己起一个只监听回环地址的 HTTP 服务，托管 GeoGebra 离线页面；
+# 页面加载完 GeoGebra 后经 SSE 连回桥，页面上的 ggbApplet API 就是工具面：
+#   mcp__geogebra__status / help / objects / object / events / screenshot /
+#   view / eval / set / edit / state / export / canvas_create / canvas_release
+#
+# canvas_create 默认会先登记一条「等你打开画布」的请求并挂住这次调用；
+# 网页界面上的弹窗（本包的 client.js，注册在 shell.overlay）轮询
+# /api/dsh-geogebra-bridge/pending，用户点「已打开」后再由宿主半边转发给桥。
+# 桥的端口可能从 3460 顺延，宿主半边按 basePort + ports 扫一遍，只认自报
+# name=geogebra-math-bridge 且 protocol>=2 的桥。
+#
+# MCP 客户端挂在 preset 自己的 plugins 里，而不是宿主全局层：mcp-client 的
+# 工具注册在挂载它的那个 scope 上，所以这 14 个工具只对选了数学模式的
+# Agent 可见，其他模式（标准 / PTC / 极简 / 创造 / MC / 用户自建）完全看不到。
+#
+# 数学模式的全局工具 = MC 模式那一份（todo / goal / ask-user / plan-mode）
+# 再加上标准模式的子 Agent 那一组（subagent / subagent_fork / list_agents /
+# interrupt_agent / send_message / workflow）。宿主全局层的工具行在这套
+# 部署里都是 disabled，模式能用的工具就等于下面这份 plugins 清单。
+#
+# toolCallTimeoutMs 要盖过桥自己的超时：整份构造的 get/set 最长 120s，
+# 导出最长 60s，而 canvas_create 默认还要等用户在弹窗里点「已打开」（最长 5 分钟），
+# 所以这里放到 10 分钟，否则等确认的调用会先被宿主掐断。
+#
+# 系统提示词用 persona 的 complete 模式：整段提示词就是下面 prefix 的文本，
+# 宿主的基线提示词、工作目录、运行时上下文、工具引导都不会追加进来。
+#
+# 流程工具在宿主层都是 disabled 的（tools.goal / tool-todo / plan-mode /
+# tool-ask-user），所以也要在这个 preset 里挂载。
+- insert:
+    - id: geogebra-bridge-ui
+      name: 'dsh-geogebra-bridge-bundle'
+      config:
+        # 桥的默认端口；被占用时它自己往后顺延，这里按同一段扫。
+        basePort: !!js Number(process.env.GGB_BRIDGE_PORT ?? 3460)
+        ports: 20
+    - id: preset-math
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: math
+        name: 数学模式
+        description: 和浏览器里的 GeoGebra 一起做数学：画图、读构造、算符号、导出图，外加目标/待办/提问/计划与子 Agent。
+        order: 6
+        plugins:
+          - id: mcp-geogebra
+            name: '@deepseek-ai/dsh-mcp-client'
+            config:
+              serverName: geogebra
+              transport: stdio
+              command: node
+              args:
+                # 桥的入口。默认按 README 的推荐布局找 ~/geogebra/GeoGebraMCPServer；
+                # 装在别处时用环境变量 GGB_BRIDGE_BIN 覆盖，或改掉下面的默认值。
+                - !!js process.env.GGB_BRIDGE_BIN ?? (process.env.HOME ?? process.env.USERPROFILE ?? '') + '/geogebra/GeoGebraMCPServer/bin/geogebra-mcp-bridge.mjs'
+              env:
+                # GeoGebra 官方离线包。默认与两个仓库同级；换位置时用 GGB_ROOT 覆盖。
+                GGB_ROOT: !!js process.env.GGB_ROOT ?? (process.env.HOME ?? process.env.USERPROFILE ?? '') + '/geogebra/geogebra-math-apps-bundle'
+              toolCallTimeoutMs: 600000
+              failOnStartupError: true
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              complete: true
+              includeRuntimeContext: false
+              prefix: |-
+                你正在和一个浏览器里的 GeoGebra（离线包 5.4.932.1）配合做数学：用 mcp__geogebra__ 开头的工具在「画布」上画图、读构造、算符号、导出图，用户在浏览器里看得见每一步。
+
+                要求
+                - 精确完成用户提出的要求就够了：不要顺手加用户没要的东西（额外对象、额外视图、额外文字、额外导出、额外文件）。
+                - 除非用户明确要求，不要为了「好看」去调颜色、线宽、点大小、线型、字体、填充、布局、动画这类外观项；不特意设置时，GeoGebra 用自己的默认样式。
+                - 用户没提到的地方不要替他决定。确实必须选、且会影响结果的（坐标范围、对象命名口径、是否保留中间对象…）用 ask_user_question 问一句，别自己猜着做完；界面 app 按下面「界面」那段流程自己定，不用问。
+                - 验证只针对要求本身：要求作图就核对对象与数值，不要顺手重构、优化、润色或补文档。
+
+                画布（每个操作都要带 id）
+                1. 先 canvas_create 建一个空白画布，指定 app（按下面「界面」那段流程选）。它返回一个 id 和一个地址。
+                   这一步默认会在用户的网页界面上弹出确认框：用户点开地址、页面连上，再点「已打开」，
+                   这个调用才会返回。所以它可能等上几十秒到几分钟——这是正常的，在它返回之前
+                   绝对不要重复建画布；返回之后照常往下做。
+                2. 之后每个操作都带这个 id：objects / object / events / screenshot / view / eval / set / edit / state / export。
+                3. 不再需要时用 canvas_release 释放它——页面里的 applet 会被真正拆除，别放着不管。
+                4. 要同时看两套界面（比如新版 3D 计算器 + 老界面）就建两个画布，各带自己的 id，互不干扰。status 列出所有画布。
+
+                界面（canvas_create 的 app，页面加载时定死，之后改不了）：按顺序选，命中就停
+                1. 需要 3D 绘图 / 立体（空间点、曲面、立体几何）→ 3d
+                2. 不需要坐标网格的几何问题（作图、证明、尺规、角度、圆）→ geometry（它的网格与坐标轴默认关闭）
+                3. 可以只用 suite 完成任务（函数、数列、统计、表格、符号计算）→ suite
+                4. 其它（要经典多视图布局、构形协议，或用户点名要经典界面）→ classic
+                选错 app 只能 canvas_release 后重建，所以建画布之前先把 app 按上面定下来，别建了再改。
+                3d 需要浏览器有可用的 WebGL，没有时 3D 面板一片空白（view 会报出来）。
+
+                节奏
+                1. 先看再动：动手前用 objects / view 了解现状，动完用它俩或 screenshot 对账。
+                2. 一次只做一个动作，拿到结果再做下一个；不要把一串互不相关的命令堆在一次 eval 里。
+                3. eval 里命令名必须英文；GeoGebra 不返回错误文本，所以 eval 用「构造或视图有没有变化」判断成败，返回「没有产生任何变化」就多半是语法或参数错了。
+                4. 自动命名会撞车：Segment(A,B) 可能自动叫 f，之后再写 f(x)=x^2 就把那条线段改掉了。给对象显式命名，并照 eval 返回里的真实名字继续写。
+                5. 符号计算用 eval 的 engine="cas"（只有 classic / suite 带 CAS；3d / geometry 没有）。
+                6. 用户在画布上自己拖过、点过之后，先读 events，再决定怎么接。
+                7. screenshot / export 只出 2D 图形区（整窗也一样），3D 面板的内容抓不到；要给 3D 出图，就把 3D 内容投影到 2D 重画。
+                8. 画布没连上时先 status：它给出该画布的地址，让用户打开即可，不要反复重试；用户还没打开时，画布确认框会一直等在界面上，等它就行。
+
+                任务
+                - 多步任务用 todo_write 记进度。
+                - 跨轮次的长期目标用 create_goal 建立，get_goal 查看，update_goal 更新或结束。
+                - 需要用户做选择时用 ask_user_question。
+                - 动手实现方案前，用 exit_plan_mode 提交计划并等待确认；计划里写清要建哪些对象、怎么验证。
+                - 需要并行探索或独立核查时用 subagent / subagent_fork，多路编排用 workflow。
+          - id: tool-goal
+            name: '@deepseek-ai/dsh-tool-goal'
+          - id: tool-ask-user
+            name: '@deepseek-ai/dsh-tool-ask-user'
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
+          - id: planning
+            name: cordis:group
+            group: true
+            isolate:
+              planMode: true
+            config:
+              - id: plan-mode
+                name: '@deepseek-ai/dsh-plan-mode'
+                config:
+                  # persona 的 complete 模式让整段提示词只有 prefix，这段 section 不会
+                  # 出现在请求里；plan-mode 要求 section 非空，所以留一句行为约定。
+                  section: |-
+                    计划模式：先把方案想清楚，再用 exit_plan_mode 提交完整计划并等待确认。
+                    计划写清目标、成功标准、要建哪些对象、怎么验证，以及有哪些假设。
+                    确认之后再动手。
+          - id: delegation
+            name: cordis:group
+            group: true
+            isolate:
+              workflowEngine: true
+            config:
+              - id: tool-subagent-control
+                name: '@deepseek-ai/dsh-tool-subagent-control'
+              - id: tool-subagent-list-agents
+                name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
+              - id: tool-subagent
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: spawn
+                  toolName: subagent
+                  modelSelectionSettings: true
+                  backgroundMode: continuable
+              - id: tool-subagent-fork
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: fork
+                  toolName: subagent_fork
+                  backgroundMode: continuable
+              - id: workflow-ptc
+                name: '@deepseek-ai/dsh-workflow-ptc'
+                config:
+                  provider: spawn
+              - id: tool-workflow
+                name: '@deepseek-ai/dsh-tool-workflow'
+
+    # ── 数学模式+：标准模式 ∪ 数学模式 ──────────────────────────────────────
+    #
+    # 工具面 = 标准模式那一份 + 数学模式的 mcp__geogebra__*（preset 自己挂载的
+    # mcp-client）。这里把标准模式的 plugins 原样抄一遍，再在 persona 后面插进
+    # mcp-geogebra；宿主全局层的工具行在这套部署里都是 disabled，模式能用的工具
+    # 就等于这份清单。
+    #
+    # 系统提示词 = 标准模式 persona 的 prefix + 数学模式 persona 的 prefix，
+    # 两段首尾相接放进同一个 prefix；suffix 沿用标准模式的 {{cwd}}。
+    #
+    # 为什么不用数学模式的 complete:true：那会把宿主基线提示词、工具引导、运行时
+    # 上下文和 plan-mode 的 section 全部抹掉，只剩拼起来的两句 persona——得到的
+    # 是「两段提示词」，而不是「标准模式的提示词 + 数学模式的提示词」。标准模式的
+    # 提示词本来就由「基线 + persona prefix/suffix + 工具引导 + 运行时上下文」组成，
+    # 所以这里走标准模式的装配方式（不设 complete），再把数学模式那段 persona
+    # 接在标准模式 prefix 后面。
+    #
+    # 与标准模式的差异只有两处：prefix 里多了数学模式那一整段；多挂了 mcp-geogebra。
+    # 标准模式那一层的行如果有增删，这份抄件要跟着同步（preset 之间没有继承机制）。
+    #
+    # ⚠ 代价：preset 的子插件在加载时就挂载，所以这一行会让 profile 里多出一个
+    # mcp-client 和它拉起的第二个桥进程（端口 3460 → 3461）。宿主半边按端口段扫出
+    # 所有带确认协议的桥、弹窗把它们的 /api/pending 合并，所以多桥共存依然接得对；
+    # 想回到只有一个桥，重启 DSH 进程。
+    - id: preset-math-plus
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: math-plus
+        name: 数学模式+
+        description: 标准模式 + 数学模式：读写文件、跑命令、联网、派子 Agent，同时用 GeoGebra 画图、算符号、导出图。
+        order: 7
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              suffix: Your working directory is {{cwd}}.
+              prefix: |-
+                You are a coding agent powered by the {{model}} model.
+
+                你正在和一个浏览器里的 GeoGebra（离线包 5.4.932.1）配合做数学：用 mcp__geogebra__ 开头的工具在「画布」上画图、读构造、算符号、导出图，用户在浏览器里看得见每一步。
+
+                要求
+                - 精确完成用户提出的要求就够了：不要顺手加用户没要的东西（额外对象、额外视图、额外文字、额外导出、额外文件）。
+                - 除非用户明确要求，不要为了「好看」去调颜色、线宽、点大小、线型、字体、填充、布局、动画这类外观项；不特意设置时，GeoGebra 用自己的默认样式。
+                - 用户没提到的地方不要替他决定。确实必须选、且会影响结果的（坐标范围、对象命名口径、是否保留中间对象…）用 ask_user_question 问一句，别自己猜着做完；界面 app 按下面「界面」那段流程自己定，不用问。
+                - 验证只针对要求本身：要求作图就核对对象与数值，不要顺手重构、优化、润色或补文档。
+
+                画布（每个操作都要带 id）
+                1. 先 canvas_create 建一个空白画布，指定 app（按下面「界面」那段流程选）。它返回一个 id 和一个地址。
+                   这一步默认会在用户的网页界面上弹出确认框：用户点开地址、页面连上，再点「已打开」，
+                   这个调用才会返回。所以它可能等上几十秒到几分钟——这是正常的，在它返回之前
+                   绝对不要重复建画布；返回之后照常往下做。
+                2. 之后每个操作都带这个 id：objects / object / events / screenshot / view / eval / set / edit / state / export。
+                3. 不再需要时用 canvas_release 释放它——页面里的 applet 会被真正拆除，别放着不管。
+                4. 要同时看两套界面（比如新版 3D 计算器 + 老界面）就建两个画布，各带自己的 id，互不干扰。status 列出所有画布。
+
+                界面（canvas_create 的 app，页面加载时定死，之后改不了）：按顺序选，命中就停
+                1. 需要 3D 绘图 / 立体（空间点、曲面、立体几何）→ 3d
+                2. 不需要坐标网格的几何问题（作图、证明、尺规、角度、圆）→ geometry（它的网格与坐标轴默认关闭）
+                3. 可以只用 suite 完成任务（函数、数列、统计、表格、符号计算）→ suite
+                4. 其它（要经典多视图布局、构形协议，或用户点名要经典界面）→ classic
+                选错 app 只能 canvas_release 后重建，所以建画布之前先把 app 按上面定下来，别建了再改。
+                3d 需要浏览器有可用的 WebGL，没有时 3D 面板一片空白（view 会报出来）。
+
+                节奏
+                1. 先看再动：动手前用 objects / view 了解现状，动完用它俩或 screenshot 对账。
+                2. 一次只做一个动作，拿到结果再做下一个；不要把一串互不相关的命令堆在一次 eval 里。
+                3. eval 里命令名必须英文；GeoGebra 不返回错误文本，所以 eval 用「构造或视图有没有变化」判断成败，返回「没有产生任何变化」就多半是语法或参数错了。
+                4. 自动命名会撞车：Segment(A,B) 可能自动叫 f，之后再写 f(x)=x^2 就把那条线段改掉了。给对象显式命名，并照 eval 返回里的真实名字继续写。
+                5. 符号计算用 eval 的 engine="cas"（只有 classic / suite 带 CAS；3d / geometry 没有）。
+                6. 用户在画布上自己拖过、点过之后，先读 events，再决定怎么接。
+                7. screenshot / export 只出 2D 图形区（整窗也一样），3D 面板的内容抓不到；要给 3D 出图，就把 3D 内容投影到 2D 重画。
+                8. 画布没连上时先 status：它给出该画布的地址，让用户打开即可，不要反复重试；用户还没打开时，画布确认框会一直等在界面上，等它就行。
+
+                任务
+                - 多步任务用 todo_write 记进度。
+                - 跨轮次的长期目标用 create_goal 建立，get_goal 查看，update_goal 更新或结束。
+                - 需要用户做选择时用 ask_user_question。
+                - 动手实现方案前，用 exit_plan_mode 提交计划并等待确认；计划里写清要建哪些对象、怎么验证。
+                - 需要并行探索或独立核查时用 subagent / subagent_fork，多路编排用 workflow。
+          - id: mcp-geogebra
+            name: '@deepseek-ai/dsh-mcp-client'
+            config:
+              serverName: geogebra
+              transport: stdio
+              command: node
+              args:
+                - !!js process.env.GGB_BRIDGE_BIN ?? (process.env.HOME ?? process.env.USERPROFILE ?? '') + '/geogebra/GeoGebraMCPServer/bin/geogebra-mcp-bridge.mjs'
+              env:
+                GGB_ROOT: !!js process.env.GGB_ROOT ?? (process.env.HOME ?? process.env.USERPROFILE ?? '') + '/geogebra/geogebra-math-apps-bundle'
+              toolCallTimeoutMs: 600000
+              failOnStartupError: true
+          - id: agent-instructions
+            name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 65536
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: !!js process.platform !== 'win32'
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+          - id: tool-jobs
+            name: '@deepseek-ai/dsh-tool-jobs'
+          - id: skill-filesystem
+            name: '@deepseek-ai/dsh-skill-filesystem'
+          - id: tool-skill
+            name: '@deepseek-ai/dsh-tool-skill'
+          - id: command-goal
+            name: '@deepseek-ai/dsh-command-goal'
+          - id: tool-goal
+            name: '@deepseek-ai/dsh-tool-goal'
+          - id: planning
+            name: cordis:group
+            group: true
+            isolate:
+              planMode: true
+            config:
+              - id: plan-mode
+                name: '@deepseek-ai/dsh-plan-mode'
+                config:
+                  section: |
+                    You are in plan mode. Stay in plan mode until exit_plan_mode succeeds or the user switches the session mode. Imperative language to implement changes means plan the implementation, not execute it. A user's conversational agreement — including an answer confirming something you asked — approves nothing and does not end plan mode; fold the confirmed decision into the plan and submit it through exit_plan_mode.
+
+                    Explore first. Use non-mutating reads, searches, static analysis, and checks to ground the plan in the actual repository. Do not edit or write files, change configuration, run formatters or code generation that rewrites tracked files, commit, or otherwise carry out the plan. Prefer existing functions and patterns over new machinery.
+
+                    The tool catalog stays the same across modes for request-cache stability. These plan-mode rules override any later tool description or guidance that suggests using mutation tools; those tools remain listed to keep the tool catalog unchanged. Do not use todo_write to track this planning phase: it tracks implementation after an approved plan, while the plan itself belongs in exit_plan_mode.
+
+                    Resolve discoverable facts by inspection. Use ask_user_question only for user-owned choices or material ambiguity that inspection cannot answer. Do not ask the user where code lives or how current behavior works when you can find out.
+
+                    Make the plan decision-complete: state the goal and success criteria; group implementation changes by subsystem; identify public API, schema, and data-flow changes; cover edge cases, failure modes, tests, acceptance criteria, and explicit assumptions. Keep it concise enough to review but detailed enough that another engineer can implement it without making design decisions.
+
+                    When ready, call exit_plan_mode with the complete plan markdown, starting with a # title. Make exit_plan_mode the only and final tool call in that assistant response: it presents the plan for approval, and implementation begins only in a later step after approval. Do not paste the final plan as a plain reply or ask "should I proceed?" through prose or ask_user_question. If review rejects it, incorporate the feedback and present again. If the review channel is unavailable or aborted, stay in plan mode and ask the user to switch modes manually; do not proceed with implementation.
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+          - id: delegation
+            name: cordis:group
+            group: true
+            isolate:
+              workflowEngine: true
+            config:
+              - id: tool-subagent-control
+                name: '@deepseek-ai/dsh-tool-subagent-control'
+              - id: tool-subagent-list-agents
+                name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
+              - id: tool-subagent
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: spawn
+                  toolName: subagent
+                  modelSelectionSettings: true
+                  backgroundMode: continuable
+              - id: tool-subagent-fork
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: fork
+                  toolName: subagent_fork
+                  backgroundMode: continuable
+              - id: tool-subagent-codex
+                name: '@deepseek-ai/dsh-tool-subagent'
+                disabled: true
+                config:
+                  provider: codex
+                  toolName: subagent_codex
+                  backgroundMode: one-shot
+                  maxDepth: provider-managed
+              - id: tool-subagent-claude-code
+                name: '@deepseek-ai/dsh-tool-subagent'
+                disabled: true
+                config:
+                  provider: claude-code
+                  toolName: subagent_claude_code
+                  backgroundMode: one-shot
+                  maxDepth: provider-managed
+              - id: workflow-ptc
+                name: '@deepseek-ai/dsh-workflow-ptc'
+                config:
+                  provider: spawn
+              - id: tool-workflow
+                name: '@deepseek-ai/dsh-tool-workflow'
+              - id: tool-ralph
+                name: '@deepseek-ai/dsh-tool-ralph'
+                disabled: true
+                config:
+                  subagentProvider: spawn
+                  maxRounds: 64
+          - id: tool-ask-user
+            name: '@deepseek-ai/dsh-tool-ask-user'
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
+          - id: tool-web
+            name: '@deepseek-ai/dsh-tool-web'
+            config:
+              fetch: true
+              searchTimeoutMs: 60000
+          - id: present
+            name: '@deepseek-ai/dsh-tool-present'
+          - id: tool-plugin-manager
+            name: '@deepseek-ai/dsh-plugin-manager/tools'
+            disabled: true
