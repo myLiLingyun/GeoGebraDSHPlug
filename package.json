@@ -1,20 +1,11 @@
 {
   "name": "dsh-geogebra-bridge-bundle",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "type": "module",
-  "description": "DSH bundle：声明「数学模式」与「数学模式+」两个 agent preset，在 preset 自己的 scope 里接入 GeoGebra 桥（MCP stdio server），并在 DSH 网页界面提供「打开画布」确认弹窗与代理路由。",
-  "main": "index.js",
-  "exports": {
-    ".": "./index.js",
-    "./client": "./client.js",
-    "./package.json": "./package.json"
-  },
+  "description": "DSH bundle：只声明「数学模式」与「数学模式+」两个 agent preset，在 preset 自己的 scope 里接入 GeoGebra 桥（MCP stdio server）。",
   "files": [
     "cordis.patch.yml",
-    "index.js",
-    "client.js",
-    "routes.js",
     "LICENSE",
     "LICENSE.CC-BY-NC-SA-4.0",
     "README.md"
@@ -37,16 +28,12 @@
   ],
   "meta": {
     "title": "GeoGebra 桥 + 数学模式 / 数学模式+",
-    "description": "「数学模式」里接入 geogebra-mcp-bridge（MCP stdio 程序）：mcp__geogebra__* 只对该模式可见；建画布时在网页界面弹窗，等用户确认已打开再继续。「数学模式+」在此之上并入标准模式的全部工具，系统提示词是两边 persona 提示词的拼接。"
+    "description": "「数学模式」里接入 geogebra-mcp-bridge（MCP stdio 程序）：mcp__geogebra__* 只对该模式可见；canvas_create 立即返回画布地址，模型把地址交给用户打开，下一轮再用 status 检查连接。「数学模式+」在此之上并入标准模式的全部工具。"
   },
   "dsh": {
     "manifestVersion": 1,
     "bundle": {
       "patch": "./cordis.patch.yml"
-    },
-    "client": {
-      "platform": "web",
-      "immediately": true
     }
   }
 }
