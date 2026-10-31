@@ -69,7 +69,8 @@ LICENSE.CC-BY-NC-SA-4.0  文档许可
 
 ## 安装
 
-推荐把两个仓库和离线包放在同一个父目录，默认路径就能全部命中：
+推荐把两个仓库和离线包放在同一个父目录。默认会依次查找 `~/geogebra/`、
+`~/Projects/GGB/` 和主目录下的解压结果，按这个布局安装可全部命中：
 
 ```text
 geogebra/
@@ -102,15 +103,26 @@ unzip geogebra-math-apps-bundle.zip -d geogebra-math-apps-bundle
 dsh plugin --profile web add ~/geogebra/GeoGebraDSHPlug
 ```
 
-装完**重启 DSH 进程**。仓库不在 `~/geogebra` 时，启动 DSH 前设置：
+装完**重启 DSH 进程**。桥的入口按下面的顺序确定：
+
+1. 环境变量 `GGB_BRIDGE_BIN`；
+2. 依次查找 `~/geogebra/GeoGebraMCPServer/bin/`、`~/Projects/GGB/server/bin/`、
+   `~/GeoGebraMCPServer/bin/` 下的 `geogebra-mcp-bridge.mjs`；
+3. 都不存在时退回 `~/geogebra/GeoGebraMCPServer/bin/geogebra-mcp-bridge.mjs`。
+
+离线包（`GGB_ROOT`，需含 `GeoGebra/deployggb.js`）同理：优先环境变量，
+否则依次找 `~/geogebra/`、`~/Projects/GGB/`、`~/` 下的
+`geogebra-math-apps-bundle`。
+
+装在别处时，启动 DSH 前设置：
 
 ```bash
 export GGB_BRIDGE_BIN="$HOME/path/to/GeoGebraMCPServer/bin/geogebra-mcp-bridge.mjs"
 export GGB_ROOT="$HOME/path/to/geogebra-math-apps-bundle"
 ```
 
-桌面启动器不继承 shell 的 `export`，这种情况请改 `cordis.patch.yml` 里
-`preset-math` / `preset-math-plus` 两处默认值。
+桌面启动器不继承 shell 的 `export`，这时用 `dsh` 在终端里启动，或把仓库
+放到上面任一个默认位置。
 
 ### 4. 验证
 

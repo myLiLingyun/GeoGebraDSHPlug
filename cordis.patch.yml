@@ -46,12 +46,38 @@
               transport: stdio
               command: node
               args:
-                # 桥的入口。默认按 README 的推荐布局找 ~/geogebra/GeoGebraMCPServer；
-                # 装在别处时用环境变量 GGB_BRIDGE_BIN 覆盖，或改掉下面的默认值。
-                - !!js process.env.GGB_BRIDGE_BIN ?? (process.env.HOME ?? process.env.USERPROFILE ?? '') + '/geogebra/GeoGebraMCPServer/bin/geogebra-mcp-bridge.mjs'
+                # 桥的入口：优先 GGB_BRIDGE_BIN，否则依次找
+                # ~/geogebra/GeoGebraMCPServer、~/Projects/GGB/server、~/GeoGebraMCPServer。
+                - !!js >-
+                    (() => {
+                      const fs = process.getBuiltinModule('node:fs');
+                      const path = process.getBuiltinModule('node:path');
+                      const home = process.env.HOME ?? process.env.USERPROFILE ?? '';
+                      const rel = 'bin/geogebra-mcp-bridge.mjs';
+                      if (process.env.GGB_BRIDGE_BIN) return process.env.GGB_BRIDGE_BIN;
+                      const candidates = [
+                        path.join(home, 'geogebra/GeoGebraMCPServer', rel),
+                        path.join(home, 'Projects/GGB/server', rel),
+                        path.join(home, 'GeoGebraMCPServer', rel)
+                      ];
+                      return candidates.find((file) => fs.existsSync(file)) ?? candidates[0];
+                    })()
               env:
-                # GeoGebra 官方离线包。默认与两个仓库同级；换位置时用 GGB_ROOT 覆盖。
-                GGB_ROOT: !!js process.env.GGB_ROOT ?? (process.env.HOME ?? process.env.USERPROFILE ?? '') + '/geogebra/geogebra-math-apps-bundle'
+                # GeoGebra 官方离线包（含 GeoGebra/deployggb.js）：优先 GGB_ROOT，
+                # 否则依次找 ~/geogebra/、~/Projects/GGB/ 与主目录下的解压目录。
+                GGB_ROOT: !!js >-
+                    (() => {
+                      const fs = process.getBuiltinModule('node:fs');
+                      const path = process.getBuiltinModule('node:path');
+                      const home = process.env.HOME ?? process.env.USERPROFILE ?? '';
+                      if (process.env.GGB_ROOT) return process.env.GGB_ROOT;
+                      const candidates = [
+                        path.join(home, 'geogebra/geogebra-math-apps-bundle'),
+                        path.join(home, 'Projects/GGB/geogebra-math-apps-bundle'),
+                        path.join(home, 'geogebra-math-apps-bundle')
+                      ];
+                      return candidates.find((dir) => fs.existsSync(path.join(dir, 'GeoGebra/deployggb.js'))) ?? candidates[0];
+                    })()
               toolCallTimeoutMs: 180000
               failOnStartupError: true
           - id: persona
@@ -239,9 +265,35 @@
               transport: stdio
               command: node
               args:
-                - !!js process.env.GGB_BRIDGE_BIN ?? (process.env.HOME ?? process.env.USERPROFILE ?? '') + '/geogebra/GeoGebraMCPServer/bin/geogebra-mcp-bridge.mjs'
+                # 同 preset-math：优先 GGB_BRIDGE_BIN，否则自动查找。
+                - !!js >-
+                    (() => {
+                      const fs = process.getBuiltinModule('node:fs');
+                      const path = process.getBuiltinModule('node:path');
+                      const home = process.env.HOME ?? process.env.USERPROFILE ?? '';
+                      const rel = 'bin/geogebra-mcp-bridge.mjs';
+                      if (process.env.GGB_BRIDGE_BIN) return process.env.GGB_BRIDGE_BIN;
+                      const candidates = [
+                        path.join(home, 'geogebra/GeoGebraMCPServer', rel),
+                        path.join(home, 'Projects/GGB/server', rel),
+                        path.join(home, 'GeoGebraMCPServer', rel)
+                      ];
+                      return candidates.find((file) => fs.existsSync(file)) ?? candidates[0];
+                    })()
               env:
-                GGB_ROOT: !!js process.env.GGB_ROOT ?? (process.env.HOME ?? process.env.USERPROFILE ?? '') + '/geogebra/geogebra-math-apps-bundle'
+                GGB_ROOT: !!js >-
+                    (() => {
+                      const fs = process.getBuiltinModule('node:fs');
+                      const path = process.getBuiltinModule('node:path');
+                      const home = process.env.HOME ?? process.env.USERPROFILE ?? '';
+                      if (process.env.GGB_ROOT) return process.env.GGB_ROOT;
+                      const candidates = [
+                        path.join(home, 'geogebra/geogebra-math-apps-bundle'),
+                        path.join(home, 'Projects/GGB/geogebra-math-apps-bundle'),
+                        path.join(home, 'geogebra-math-apps-bundle')
+                      ];
+                      return candidates.find((dir) => fs.existsSync(path.join(dir, 'GeoGebra/deployggb.js'))) ?? candidates[0];
+                    })()
               toolCallTimeoutMs: 180000
               failOnStartupError: true
           - id: agent-instructions
